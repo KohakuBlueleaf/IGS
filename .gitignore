@@ -10,6 +10,7 @@ output/
 wandb/
 */gsc*/
 *gsc*
+!images/*.png
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
