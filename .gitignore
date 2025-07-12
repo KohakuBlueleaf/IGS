@@ -9,6 +9,7 @@ data/
 output/
 wandb/
 */gsc*/
+*gsc*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
