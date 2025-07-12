@@ -408,6 +408,9 @@ def gaussian_splatting_fused_backward_kernel(
 
 
 class TritonGaussianSplatting2D(Function):
+    BLOCK_SIZE_H = 16
+    BLOCK_SIZE_W = 16
+
     @staticmethod
     def forward(
         ctx,
@@ -489,8 +492,8 @@ class TritonGaussianSplatting2D(Function):
             result_sum.stride(0),
             result_sum.stride(1),
             result_sum.stride(2),
-            BLOCK_SIZE_H=16,
-            BLOCK_SIZE_W=16,
+            BLOCK_SIZE_H=TritonGaussianSplatting2D.BLOCK_SIZE_H,
+            BLOCK_SIZE_W=TritonGaussianSplatting2D.BLOCK_SIZE_W,
             BLOCK_SIZE_C=BLOCK_SIZE_C,
         )
 
@@ -607,8 +610,8 @@ class TritonGaussianSplatting2D(Function):
             grad_result_padded.stride(2),
             grad_result_padded.stride(3),
             eps,
-            BLOCK_SIZE_H=16,
-            BLOCK_SIZE_W=16,
+            BLOCK_SIZE_H=TritonGaussianSplatting2D.BLOCK_SIZE_H,
+            BLOCK_SIZE_W=TritonGaussianSplatting2D.BLOCK_SIZE_W,
             BLOCK_SIZE_C=BLOCK_SIZE_C,
         )
 
