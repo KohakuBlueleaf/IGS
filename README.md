@@ -3,6 +3,12 @@
 This repository contains some implementation for image gaussian splatting or more specifically: 2D gaussian splatting.
 
 ## Usage
+Install it from source
+```bash
+pip install git+https://github.com/KohakuBlueleaf/IGS
+```
+
+Usage example:
 ```python
 import torch
 from igs.gs2d import GaussianSplatting2D, gaussian_splatting_2d
@@ -28,6 +34,8 @@ generated = gaussian_splatting_2d(
     positions, colors, scales, rotations, alphas, x_grid, y_grid
 )
 ```
+
+For more detail example, please refer to [this script](/scripts/gs2d_test.py).
 
 ## 2DGS implementation
 
