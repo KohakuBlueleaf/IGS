@@ -261,6 +261,7 @@ class GaussianSplatting2DKernel(autograd.Function):
         )
 
 
+TorchGaussianSplatting2DKernel = GaussianSplatting2DKernel
 GaussianSplatting2DKernel = TritonGaussianSplatting2D or GaussianSplatting2DKernel
 
 
