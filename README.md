@@ -4,6 +4,7 @@ This repository contains some implementation for image gaussian splatting or mor
 
 An example result which use 256 features and 64 gaussian per feature to direct match a 512x512 image:
 ![example result](/images/99.png)
+
 https://github.com/user-attachments/assets/8e7051b1-338e-4552-8639-5fb7f382cf56
 
 ## Usage
