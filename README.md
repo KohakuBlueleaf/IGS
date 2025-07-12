@@ -127,3 +127,8 @@ Therefore we did a triton kernel which basically convert the custom autograd fun
 And we use a 2d triton grid on (batch_size, num_gaussians) so the operation inside the kernel match our custom autograd function.
 
 The implementation is [here](/src/igs/gs_triton.py)
+
+## TODOS
+- [ ] Profiling and optimize the triton kernel
+- [ ] Exploring better way to handle the value range of each property (to make training more stable)
+- [ ] Implement a more complete example to make some AutoEncoder or img reconstruction
