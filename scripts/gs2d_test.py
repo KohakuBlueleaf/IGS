@@ -16,7 +16,7 @@ from lpips import LPIPS
 from anyschedule import AnySchedule
 from anyschedule.utils import get_scheduler
 
-from reg import koleo_diversity_loss
+from igs.reg import koleo_diversity_loss
 from igs.gs2d import GaussianSplatting2D
 
 
