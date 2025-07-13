@@ -267,7 +267,7 @@ GaussianSplatting2DKernel = TritonGaussianSplatting2D or GaussianSplatting2DKern
 
 class GaussianSplatting2D(nn.Module):
     def __init__(
-        self, num_gaussians_per_emb, emb_dim, output_dim=3, value_range=(-1, 1)
+        self, num_gaussians_per_emb, emb_dim, output_dim=3, value_range=(-1, 1), inp_val_scale=2, scale_range=(-6, 2)
     ):
         super().__init__()
         self.num_gaussians_per_emb = num_gaussians_per_emb
@@ -276,34 +276,13 @@ class GaussianSplatting2D(nn.Module):
         self.output_dim = output_dim
         self.min_val = value_range[0]
         self.max_val = value_range[1]
+        self.value_scale = inp_val_scale
+        self.scale_min = scale_range[0]
+        self.scale_max = scale_range[1]
 
-        ##
-        # color (output_dim)
-        # log_scale (2)
-        # opacity (1)
-        # position (2)
-        # rotation (1)
-        # total (6 + output_dim)
-        project_bias = torch.randn(6 + output_dim, num_gaussians_per_emb) * 0.01
-        # color: first "output_dim"
-        # project_bias[0] = torch.rand(num_gaussians_per_emb) * 2 - 1
-        # project_bias[1] = torch.rand(num_gaussians_per_emb) * 2 - 1
-        # project_bias[2] = torch.rand(num_gaussians_per_emb) * 2 - 1
-        # log_scale
-        project_bias[output_dim] = torch.rand(num_gaussians_per_emb) * 3 - 4
-        project_bias[output_dim + 1] = torch.rand(num_gaussians_per_emb) * 3 - 4
-        # logit_opacity
-        # project_bias[5] = torch.rand(num_gaussians_per_emb) * 4 - 2
-        # positions
-        project_bias[output_dim + 3] = torch.rand(num_gaussians_per_emb) * 1.8 - 0.9
-        project_bias[output_dim + 4] = torch.rand(num_gaussians_per_emb) * 1.8 - 0.9
-        # rotation
-        # project_bias[8] = torch.rand(num_gaussians_per_emb) * 2 * torch.pi
-
-        self.norm = nn.LayerNorm(emb_dim, elementwise_affine=False)
         self.proj = nn.Linear(emb_dim, num_gaussians_per_emb * (6 + output_dim))
-        nn.init.normal_(self.proj.weight, std=0.01)
-        self.proj.bias.data.copy_(project_bias.T.flatten(0, 1))
+        nn.init.normal_(self.proj.weight, mean=0.0, std=0.001)
+        nn.init.normal_(self.proj.bias, mean=0.0, std=0.1)
 
     @staticmethod
     def xy_grid(size=None, device=None):
@@ -427,16 +406,16 @@ class GaussianSplatting2D(nn.Module):
         y_grid: [B, H, W]
         """
 
-        gs_feature = self.proj(self.norm(feature)).unflatten(-1, (-1, 9)).flatten(1, 2)
+        gs_feature = self.proj(feature).unflatten(-1, (-1, 9)).flatten(1, 2)
         b, ng, _ = gs_feature.shape
 
         (
-            colors,
-            log_scales,
-            logit_opacity,
             positions,
+            log_scales,
             rotations,
-        ) = gs_feature.split([self.output_dim, 2, 1, 2, 1], dim=-1)
+            logit_opacity,
+            colors,
+        ) = gs_feature.split([2, 2, 1, 1, self.output_dim], dim=-1)
 
         if grid is None:
             x_grid, y_grid = self.xy_grid(size, feature.device)
@@ -446,14 +425,15 @@ class GaussianSplatting2D(nn.Module):
             # pos_map will put h_pos before w_pos which means y_grid is first
             y_grid, x_grid = grid.split([1, 1], dim=1)
 
-        value_scale = 4
+        value_scale = self.value_scale
         colors = (
             torch.sigmoid(colors * value_scale) * (self.max_val - self.min_val)
             + self.min_val
         )  # [k, 3]
-        alphas = torch.sigmoid(logit_opacity[..., 0] * value_scale)  # [B, ng]
+        # alphas = torch.sigmoid(logit_opacity[..., 0] * value_scale) + 0.1  # [B, ng]
+        alphas = torch.ones_like(logit_opacity[..., 0]) # in Image GS, opacity may not be meaningful
         scales = torch.exp(
-            torch.sigmoid(log_scales / value_scale) * 10 - 8
+            torch.sigmoid(log_scales * value_scale) * (self.scale_max - self.scale_min) + self.scale_min
         )  # [B, ng, 2]
         rotations = rotations[..., 0]  # [B, ng]
         log_vram("Preprocess")
