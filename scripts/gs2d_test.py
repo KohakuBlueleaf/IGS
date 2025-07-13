@@ -33,7 +33,7 @@ class ProgressiveGaussianSplatter(nn.Module):
 
         # Initialize Gaussian parameters
         self.feature = nn.Parameter(torch.randn(1, num_features, feature_dim))
-        self.gs = GaussianSplatting2D(gaussians_per_feature, feature_dim)
+        self.gs = GaussianSplatting2D(gaussians_per_feature, feature_dim, 3, (0, 1), 3, (-7, 1))
 
     def forward(self, num_active_features=None, size=None):
         """
@@ -52,10 +52,8 @@ def gaussian_splatting_loss(rendered_image, target_image):
     """Combined L1 + L2 loss"""
     l1 = F.l1_loss(rendered_image, target_image)
     l2 = F.mse_loss(rendered_image, target_image)
-    msssim_loss = 1 - ms_ssim(
-        rendered_image, target_image, data_range=1.0, size_average=True
-    )
-    return l1 + l2 * 0.5 + msssim_loss * 0.5
+    msssim = 1 - ms_ssim(rendered_image, target_image, data_range=1.0, size_average=True)
+    return l1 + l2 * 0.5 + msssim * 0.1
 
 
 def progressive_training():
@@ -63,15 +61,15 @@ def progressive_training():
     Progressive training with random k selection
     """
     # Parameters
-    height, width = 512, 512
+    height, width = 256, 256
     num_features = 128
-    feature_dim = 1024
-    num_gaussians_per_feature = 64
+    feature_dim = 512
+    num_gaussians_per_feature = 32
     chunk_size = 4
     steps = 10000
     grad_acc = 1
     log_period = 100
-    lr = 5e-5
+    lr = 1e-4
 
     # Create target image
     # target_image = create_target_image(height, width)
@@ -97,7 +95,7 @@ def progressive_training():
         num_features, feature_dim, num_gaussians_per_feature
     ).to(DEVICE)
     optimizer = torch.optim.AdamW(
-        splatter.parameters(), lr=lr, eps=EPS, betas=(0.9, 0.98), weight_decay=0.005
+        splatter.parameters(), lr=lr, eps=EPS
     )
     scheduler = AnySchedule(
         optimizer,
@@ -108,8 +106,8 @@ def progressive_training():
                 "schedules": [
                     {
                         "mode": "constant",
-                        "end": int(steps // grad_acc * 0.4),
-                        "warmup": int(steps // grad_acc * 0.05),
+                        "end": int(steps // grad_acc * 0.5),
+                        "warmup": int(steps // grad_acc * 0.1),
                     },
                     {
                         "mode": "cosine",
@@ -143,7 +141,7 @@ def progressive_training():
         num_active_features=num_features, size=(height, width)
     )
     recon_loss = gaussian_splatting_loss(rendered, target_image)
-    reg_loss = koleo_diversity_loss(gs_feature[0], eps=EPS)
+    reg_loss = koleo_diversity_loss(gs_feature)
     (recon_loss + reg_loss).backward()
     optimizer.zero_grad()
     print("Done!")
@@ -153,7 +151,7 @@ def progressive_training():
 
     for step in (pbar := trange(steps, desc="Progressive training", smoothing=0.01)):
         ratio = 1 - torch.rand(1).item() ** 1.5
-        # ratio = random.choice([1/16, 1/8, 1/4, 1/2, 1.0])
+        ratio = random.choice([1/16, 1/8, 1/4, 1/2, 1.0])
         # ratio = step/steps
         k = int(round((ratio * num_features / chunk_size)) * chunk_size)
         if k > num_features:
@@ -170,7 +168,7 @@ def progressive_training():
             target_image,
         )
         reg_loss = koleo_diversity_loss(
-            splatter.feature,
+            splatter.feature[:, :k]
         )
         loss = recon_loss
         loss = loss + reg_loss * diversity_loss_weight_scheduler(step)
@@ -178,7 +176,7 @@ def progressive_training():
         loss.backward()
         if step % grad_acc == 0:
             # do gradient clipping
-            torch.nn.utils.clip_grad_norm_(splatter.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(splatter.parameters(), 0.1)
             optimizer.step()
             optimizer.zero_grad()
             scheduler.step()
