@@ -33,7 +33,9 @@ class ProgressiveGaussianSplatter(nn.Module):
 
         # Initialize Gaussian parameters
         self.feature = nn.Parameter(torch.randn(1, num_features, feature_dim))
-        self.gs = GaussianSplatting2D(gaussians_per_feature, feature_dim, 3, (0, 1), 3, (-7, 1))
+        self.gs = GaussianSplatting2D(
+            gaussians_per_feature, feature_dim, 3, (0, 1), 3, (-7, 1)
+        )
 
     def forward(self, num_active_features=None, size=None):
         """
@@ -52,7 +54,9 @@ def gaussian_splatting_loss(rendered_image, target_image):
     """Combined L1 + L2 loss"""
     l1 = F.l1_loss(rendered_image, target_image)
     l2 = F.mse_loss(rendered_image, target_image)
-    msssim = 1 - ms_ssim(rendered_image, target_image, data_range=1.0, size_average=True)
+    msssim = 1 - ms_ssim(
+        rendered_image, target_image, data_range=1.0, size_average=True
+    )
     return l1 + l2 * 0.5 + msssim * 0.1
 
 
@@ -94,9 +98,7 @@ def progressive_training():
     splatter = ProgressiveGaussianSplatter(
         num_features, feature_dim, num_gaussians_per_feature
     ).to(DEVICE)
-    optimizer = torch.optim.AdamW(
-        splatter.parameters(), lr=lr, eps=EPS
-    )
+    optimizer = torch.optim.AdamW(splatter.parameters(), lr=lr, eps=EPS)
     scheduler = AnySchedule(
         optimizer,
         config={
@@ -151,7 +153,7 @@ def progressive_training():
 
     for step in (pbar := trange(steps, desc="Progressive training", smoothing=0.01)):
         ratio = 1 - torch.rand(1).item() ** 1.5
-        ratio = random.choice([1/16, 1/8, 1/4, 1/2, 1.0])
+        ratio = random.choice([1 / 16, 1 / 8, 1 / 4, 1 / 2, 1.0])
         # ratio = step/steps
         k = int(round((ratio * num_features / chunk_size)) * chunk_size)
         if k > num_features:
@@ -167,9 +169,7 @@ def progressive_training():
             rendered_image,
             target_image,
         )
-        reg_loss = koleo_diversity_loss(
-            splatter.feature[:, :k]
-        )
+        reg_loss = koleo_diversity_loss(splatter.feature[:, :k])
         loss = recon_loss
         loss = loss + reg_loss * diversity_loss_weight_scheduler(step)
         loss = loss / grad_acc

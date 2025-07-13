@@ -267,7 +267,13 @@ GaussianSplatting2DKernel = TritonGaussianSplatting2D or GaussianSplatting2DKern
 
 class GaussianSplatting2D(nn.Module):
     def __init__(
-        self, num_gaussians_per_emb, emb_dim, output_dim=3, value_range=(-1, 1), inp_val_scale=2, scale_range=(-6, 2)
+        self,
+        num_gaussians_per_emb,
+        emb_dim,
+        output_dim=3,
+        value_range=(-1, 1),
+        inp_val_scale=2,
+        scale_range=(-6, 2),
     ):
         super().__init__()
         self.num_gaussians_per_emb = num_gaussians_per_emb
@@ -431,9 +437,12 @@ class GaussianSplatting2D(nn.Module):
             + self.min_val
         )  # [k, 3]
         # alphas = torch.sigmoid(logit_opacity[..., 0] * value_scale) + 0.1  # [B, ng]
-        alphas = torch.ones_like(logit_opacity[..., 0]) # in Image GS, opacity may not be meaningful
+        alphas = torch.ones_like(
+            logit_opacity[..., 0]
+        )  # in Image GS, opacity may not be meaningful
         scales = torch.exp(
-            torch.sigmoid(log_scales * value_scale) * (self.scale_max - self.scale_min) + self.scale_min
+            torch.sigmoid(log_scales * value_scale) * (self.scale_max - self.scale_min)
+            + self.scale_min
         )  # [B, ng, 2]
         rotations = rotations[..., 0]  # [B, ng]
         log_vram("Preprocess")
