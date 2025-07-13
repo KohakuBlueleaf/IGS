@@ -261,6 +261,209 @@ class GaussianSplatting2DKernel(autograd.Function):
         )
 
 
+class GaussianSplatting2DChunkedKernel(autograd.Function):
+    """
+    A pytorch implementation of potentially faster version of GaussianSplatting2DKernel
+    Which splits gaussian into chunks and use matmul to get output of current chunk.
+    This approach utilize matmul (tensor core) in einsum(bchw, bnc -> bnhw) part
+    while saving the vram since the max intermediate size is B, N_CHUNK_SIZE, H, W
+    """
+
+    N_CHUNK_SIZE = 32
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        y,
+        position,
+        cov_inv_00,
+        cov_inv_01,
+        cov_inv_11,
+        alphas,
+        colors,
+        eps=1e-6,
+    ):
+        B, _, H, W = x.shape
+        N = position.size(1)
+        B, N, C = colors.shape
+        chunk_size = GaussianSplatting2DChunkedKernel.N_CHUNK_SIZE
+
+        result = torch.zeros(B, C, H, W, device=x.device, dtype=x.dtype)
+        weight_sum = torch.zeros(B, H, W, device=x.device, dtype=x.dtype)
+        log_vram("Result Init")
+        for gaussian in range(0, N, chunk_size):
+            dx = (
+                x - position[:, gaussian : gaussian + chunk_size, 0, None, None]
+            )  # [B, cn, H, W]
+            dy = (
+                y - position[:, gaussian : gaussian + chunk_size, 1, None, None]
+            )  # [B, cn, H, W]
+            weight_block = (
+                torch.exp(
+                    -0.5
+                    * (
+                        cov_inv_00[:, gaussian : gaussian + chunk_size] * (dx**2)
+                        + cov_inv_11[:, gaussian : gaussian + chunk_size] * (dy**2)
+                        + cov_inv_01[:, gaussian : gaussian + chunk_size]
+                        * (2 * dx * dy)
+                    )
+                )
+                * alphas[:, gaussian : gaussian + chunk_size, None, None]
+            )  # [B, H, W]
+            # perform matmul which iterate through N dim
+            result += torch.einsum(
+                "bnhw, bnc -> bchw",
+                weight_block,
+                colors[:, gaussian : gaussian + chunk_size],
+            )  # [B, C, H, W]
+            weight_sum += weight_block.sum(dim=1)
+
+        result /= (weight_sum + eps)[:, None, :, :]
+
+        ctx.save_for_backward(
+            x,
+            y,
+            position,
+            cov_inv_00,
+            cov_inv_01,
+            cov_inv_11,
+            alphas,
+            colors,
+            weight_sum,
+        )
+        ctx.eps = eps
+        return result
+
+    @staticmethod
+    def backward(ctx, grad_result):
+        (
+            x,
+            y,
+            position,
+            cov_inv_00,
+            cov_inv_01,
+            cov_inv_11,
+            alphas,
+            colors,
+            result_sum,
+        ) = ctx.saved_tensors
+        eps = ctx.eps
+        B, _, H, W = x.shape
+        N = position.size(1)
+        chunk_size = GaussianSplatting2DChunkedKernel.N_CHUNK_SIZE
+
+        # Initialize gradients
+        grad_x = torch.zeros_like(x)
+        grad_y = torch.zeros_like(y)
+        grad_position = torch.zeros_like(position)
+        grad_cov_inv_00 = torch.zeros_like(cov_inv_00)
+        grad_cov_inv_01 = torch.zeros_like(cov_inv_01)
+        grad_cov_inv_11 = torch.zeros_like(cov_inv_11)
+        grad_alphas = torch.zeros_like(alphas)
+        grad_colors = torch.zeros_like(colors)
+
+        # grad result is [B, C, H, W] where C=3 so we directly use it
+        # if C is large than we should do iterative process just like for g in range(N)
+        result_sum += eps
+        grad_result_sum = -(grad_result * grad_result).sum(dim=1) / (result_sum**2)
+        grad_result /= result_sum[:, None, :, :]
+
+        # Process each Gaussian separately to save memory
+        for gaussian in range(0, N, chunk_size):
+            color = colors[:, gaussian : gaussian + chunk_size, :]  # [B, cn, 3]
+            grad_result_curr = torch.einsum(
+                "bchw, bnc -> bnhw", grad_result, color
+            )  # [B, cn, H, W]
+
+            # Recompute forward values for this Gaussian
+            dx = (
+                x - position[:, gaussian : gaussian + chunk_size, 0, None, None]
+            )  # [B, cn, H, W]
+            dy = (
+                y - position[:, gaussian : gaussian + chunk_size, 1, None, None]
+            )  # [B, cn, H, W]
+
+            cov_inv_00_cur = cov_inv_00[:, gaussian : gaussian + chunk_size]
+            cov_inv_01_cur = cov_inv_01[:, gaussian : gaussian + chunk_size]
+            cov_inv_11_cur = cov_inv_11[:, gaussian : gaussian + chunk_size]
+
+            # Mahalanobis distance
+            distance = (
+                cov_inv_00_cur * (dx**2)
+                + cov_inv_11_cur * (dy**2)
+                + cov_inv_01_cur * (2 * dx * dy)
+            )
+
+            # Gaussian value (without alpha)
+            gaussian_val = torch.exp(-0.5 * distance)  # [B, cn, H, W]
+
+            # Gaussian value with alpha
+            gaussian_val_alpha = (
+                gaussian_val * alphas[:, gaussian : gaussian + chunk_size, None, None]
+            )  # [B, H, W]
+            grad_colors[:, gaussian : gaussian + chunk_size] = (
+                grad_result[:, None] * gaussian_val_alpha[:, :, None]
+            ).sum(dim=(3, 4))
+
+            # Combined gradient from both grad_result and grad_result_sum
+            grad_gaussian = (
+                grad_result_curr + grad_result_sum[:, None, :, :]
+            )  # [B, cn, H, W]
+
+            # Gradient w.r.t alpha
+            # print(grad_gaussian.shape, gaussian_val.shape, alphas.shape)
+            grad_alphas[:, gaussian : gaussian + chunk_size] = (
+                grad_gaussian * gaussian_val
+            ).sum(dim=(2, 3))
+
+            # Common factor for spatial and covariance gradients
+            common_factor = grad_gaussian * gaussian_val_alpha * (-0.5)  # [B, H, W]
+
+            # Gradients w.r.t distance components
+            grad_distance_dx = common_factor * (
+                2 * cov_inv_00_cur * dx + 2 * cov_inv_01_cur * dy
+            )
+            grad_distance_dy = common_factor * (
+                2 * cov_inv_11_cur * dy + 2 * cov_inv_01_cur * dx
+            )
+
+            # Gradients w.r.t spatial coordinates
+            grad_x += grad_distance_dx.sum(dim=1, keepdim=True)
+            grad_y += grad_distance_dy.sum(dim=1, keepdim=True)
+
+            # Gradients w.r.t position (negative of spatial gradients)
+            grad_position[:, gaussian : gaussian + chunk_size, 0] = (
+                -grad_distance_dx.sum(dim=(2, 3))
+            )
+            grad_position[:, gaussian : gaussian + chunk_size, 1] = (
+                -grad_distance_dy.sum(dim=(2, 3))
+            )
+
+            # Gradients w.r.t inverse covariance matrix elements
+            grad_cov_inv_00[:, gaussian : gaussian + chunk_size] = (
+                common_factor * (dx**2)
+            ).sum(dim=(2, 3), keepdim=True)
+            grad_cov_inv_11[:, gaussian : gaussian + chunk_size] = (
+                common_factor * (dy**2)
+            ).sum(dim=(2, 3), keepdim=True)
+            grad_cov_inv_01[:, gaussian : gaussian + chunk_size] = (
+                common_factor * (2 * dx * dy)
+            ).sum(dim=(2, 3), keepdim=True)
+
+        return (
+            grad_x,
+            grad_y,
+            grad_position,
+            grad_cov_inv_00,
+            grad_cov_inv_01,
+            grad_cov_inv_11,
+            grad_alphas,
+            grad_colors,
+            None,
+        )
+
+
 TorchGaussianSplatting2DKernel = GaussianSplatting2DKernel
 GaussianSplatting2DKernel = TritonGaussianSplatting2D or GaussianSplatting2DKernel
 
@@ -486,15 +689,15 @@ if __name__ == "__main__":
     log_vram("Model Init")
 
     # shapes:
-    # torch.Size([1, 1, 128, 128]) torch.Size([1, 1, 128, 128]) torch.Size([1, 4096, 2]) torch.Size([1, 4096, 1, 1]) torch.Size([1, 4096, 1, 1]) torch.Size([1, 4096, 1, 1]) torch.Size([1, 4096]) torch.Size([1, 4096, 3])
-    x = torch.rand(1, 1, 128, 128).to(device).requires_grad_(True)
-    y = torch.rand(1, 1, 128, 128).to(device).requires_grad_(True)
-    position = torch.rand(1, 4096, 2).to(device).requires_grad_(True)
-    cov_inv_00 = torch.rand(1, 4096, 1, 1).to(device).requires_grad_(True)
-    cov_inv_01 = torch.rand(1, 4096, 1, 1).to(device).requires_grad_(True)
-    cov_inv_11 = torch.rand(1, 4096, 1, 1).to(device).requires_grad_(True)
-    alphas = torch.rand(1, 4096).to(device).requires_grad_(True)
-    colors = torch.rand(1, 4096, 3).to(device).requires_grad_(True)
+    B, N, H, W = 3, 4096, 128, 128
+    x = torch.rand(B, 1, H, W).to(device).requires_grad_(True)
+    y = torch.rand(B, 1, H, W).to(device).requires_grad_(True)
+    position = torch.rand(B, N, 2).to(device).requires_grad_(True)
+    cov_inv_00 = torch.rand(B, N, 1, 1).to(device).requires_grad_(True)
+    cov_inv_01 = torch.rand(B, N, 1, 1).to(device).requires_grad_(True)
+    cov_inv_11 = torch.rand(B, N, 1, 1).to(device).requires_grad_(True)
+    alphas = torch.rand(B, N).to(device).requires_grad_(True)
+    colors = torch.rand(B, N, 3).to(device).requires_grad_(True)
 
     log_vram("Input")
 
@@ -545,7 +748,44 @@ if __name__ == "__main__":
         alphas.grad,
         colors.grad,
     )
+    (
+        x.grad,
+        y.grad,
+        position.grad,
+        cov_inv_00.grad,
+        cov_inv_01.grad,
+        cov_inv_11.grad,
+        alphas.grad,
+        colors.grad,
+    ) = [None] * 8
+    torch.cuda.empty_cache()
+
+    log_vram("Gaussian Chunked st")
+    output3 = GaussianSplatting2DChunkedKernel.apply(
+        x, y, position, cov_inv_00, cov_inv_01, cov_inv_11, alphas, colors
+    )
+    log_vram("Gaussian Chunked fwd")
+    output3.mean().backward()
+    log_vram("Gaussian Chunked bwd")
+    grads3 = (
+        x.grad,
+        y.grad,
+        position.grad,
+        cov_inv_00.grad,
+        cov_inv_01.grad,
+        cov_inv_11.grad,
+        alphas.grad,
+        colors.grad,
+    )
+
+    print("-" * 10)
 
     print(F.mse_loss(output1, output2), F.l1_loss(output1, output2))
     for g1, g2 in zip(grads, grads2):
+        print(F.mse_loss(g1, g2), F.l1_loss(g1, g2))
+
+    print("-" * 10)
+
+    print(F.mse_loss(output1, output3), F.l1_loss(output1, output3))
+    for g1, g2 in zip(grads, grads3):
         print(F.mse_loss(g1, g2), F.l1_loss(g1, g2))
