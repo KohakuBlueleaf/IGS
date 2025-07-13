@@ -132,30 +132,28 @@ def gaussian_splatting_fused_forward_kernel(
             )
             tl.atomic_add(result_sum_ptr_block, weight_block, mask=mask)
 
-            # Update final result (color weighted sum)
-            for c_idx in range(0, C_padded, BLOCK_SIZE_C):
-                c_offsets = c_idx + tl.arange(0, BLOCK_SIZE_C)
-                c_mask = c_offsets < C_padded
+            c_offsets = tl.arange(0, BLOCK_SIZE_C)
+            c_mask = c_offsets < C_padded
 
-                # Pointers to the output result tensor
-                result_ptr_block = (
-                    result_ptr
-                    + b * stride_result_b
-                    + c_offsets[None, None, :] * stride_result_c
-                    + h_offsets[:, None, None] * stride_result_h
-                    + w_offsets[None, :, None] * stride_result_w
-                )
+            # Pointers to the output result tensor
+            result_ptr_block = (
+                result_ptr
+                + b * stride_result_b
+                + c_offsets[None, None, :] * stride_result_c
+                + h_offsets[:, None, None] * stride_result_h
+                + w_offsets[None, :, None] * stride_result_w
+            )
 
-                # Perform matmul and atomically add
-                # weight_block is [BLOCK_H, BLOCK_W], color is [BLOCK_C]
-                # we need to add weight_block[:, :, None] * color[None, None, :]
-                update = weight_block[:, :, None] * color[None, None, :]
+            # Perform matmul and atomically add
+            # weight_block is [BLOCK_H, BLOCK_W], color is [BLOCK_C]
+            # we need to add weight_block[:, :, None] * color[None, None, :]
+            update = weight_block[:, :, None] * color[None, None, :]
 
-                tl.atomic_add(
-                    result_ptr_block,
-                    update,
-                    mask=mask[:, :, None] & c_mask[None, None, :],
-                )
+            tl.atomic_add(
+                result_ptr_block,
+                update,
+                mask=mask[:, :, None] & c_mask[None, None, :],
+            )
 
 
 @triton.jit
@@ -408,8 +406,11 @@ def gaussian_splatting_fused_backward_kernel(
 
 
 class TritonGaussianSplatting2D(Function):
-    BLOCK_SIZE_H = 32
+    # Searched best block size for 256x256 output
+    BLOCK_SIZE_H = 1
     BLOCK_SIZE_W = 32
+    BWD_BLOCK_SIZE_H = 8
+    BWD_BLOCK_SIZE_W = 64
 
     @staticmethod
     def forward(
@@ -560,6 +561,14 @@ class TritonGaussianSplatting2D(Function):
 
         grid = (B, N)
         BLOCK_SIZE_C = C_padded
+        BLOCK_SIZE_H = (
+            TritonGaussianSplatting2D.BWD_BLOCK_SIZE_H
+            or TritonGaussianSplatting2D.BLOCK_SIZE_H
+        )
+        BLOCK_SIZE_W = (
+            TritonGaussianSplatting2D.BWD_BLOCK_SIZE_W
+            or TritonGaussianSplatting2D.BLOCK_SIZE_W
+        )
 
         gaussian_splatting_fused_backward_kernel[grid](
             x.squeeze(1),
@@ -610,8 +619,8 @@ class TritonGaussianSplatting2D(Function):
             grad_result_padded.stride(2),
             grad_result_padded.stride(3),
             eps,
-            BLOCK_SIZE_H=TritonGaussianSplatting2D.BLOCK_SIZE_H,
-            BLOCK_SIZE_W=TritonGaussianSplatting2D.BLOCK_SIZE_W,
+            BLOCK_SIZE_H=BLOCK_SIZE_H,
+            BLOCK_SIZE_W=BLOCK_SIZE_W,
             BLOCK_SIZE_C=BLOCK_SIZE_C,
         )
 
