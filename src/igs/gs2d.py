@@ -8,6 +8,7 @@ try:
     import triton
     import triton.language as tl
     from .gs_triton import TritonGaussianSplatting2D
+    from .gs_triton_chunked import TritonGaussianSplatting2DChunked
 except ImportError:
     TritonGaussianSplatting2D = None
     pass
@@ -465,7 +466,7 @@ class GaussianSplatting2DChunkedKernel(autograd.Function):
 
 
 TorchGaussianSplatting2DKernel = GaussianSplatting2DKernel
-GaussianSplatting2DKernel = TritonGaussianSplatting2D or GaussianSplatting2DKernel
+GaussianSplatting2DKernel = TritonGaussianSplatting2DChunked or GaussianSplatting2DKernel
 
 
 class GaussianSplatting2D(nn.Module):
