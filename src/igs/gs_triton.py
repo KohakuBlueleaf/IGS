@@ -408,8 +408,8 @@ def gaussian_splatting_fused_backward_kernel(
 
 
 class TritonGaussianSplatting2D(Function):
-    BLOCK_SIZE_H = 16
-    BLOCK_SIZE_W = 16
+    BLOCK_SIZE_H = 32
+    BLOCK_SIZE_W = 32
 
     @staticmethod
     def forward(
