@@ -562,15 +562,15 @@ class TritonGaussianSplatting2DChunked(Function):
         eps=1e-6,
     ):
         # Make inputs contiguous
-        x = x.contiguous()
-        y = y.contiguous()
-        position = position.contiguous()
-        cov_inv_00 = cov_inv_00.contiguous()
-        cov_inv_01 = cov_inv_01.contiguous()
-        cov_inv_11 = cov_inv_11.contiguous()
-        alphas = alphas.contiguous()
-        colors = colors.contiguous()
-
+        dtype = torch.float32
+        x = x.contiguous().to(dtype)
+        y = y.contiguous().to(dtype)
+        position = position.contiguous().to(dtype)
+        cov_inv_00 = cov_inv_00.contiguous().to(dtype)
+        cov_inv_01 = cov_inv_01.contiguous().to(dtype)
+        cov_inv_11 = cov_inv_11.contiguous().to(dtype)
+        alphas = alphas.contiguous().to(dtype)
+        colors = colors.contiguous().to(dtype)
         B, _, H, W = x.shape
         N = position.size(1)
         C = colors.size(2)
