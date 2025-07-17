@@ -30,11 +30,20 @@ class ProgressiveGaussianSplatter(nn.Module):
         super().__init__()
         self.num_gaussians = num_gaussians
 
+        if image is not None:
+            b, c, h, w = image.shape
+            aspect_ratio = w / h
+            w_grid_size = aspect_ratio ** 0.5
+            h_grid_size = 1 / aspect_ratio ** 0.5
+        else:
+            w_grid_size = 1
+            h_grid_size = 1
+
         position_grid_size = int(num_gaussians**0.5)
-        position_grid_h = torch.linspace(-1, 1, position_grid_size)[:, None].repeat(
+        position_grid_h = torch.linspace(-h_grid_size, h_grid_size, position_grid_size)[:, None].repeat(
             1, position_grid_size
         )
-        position_grid_v = torch.linspace(-1, 1, position_grid_size)[None, :].repeat(
+        position_grid_v = torch.linspace(-w_grid_size, w_grid_size, position_grid_size)[None, :].repeat(
             position_grid_size, 1
         )
         position_grid = torch.stack([position_grid_v, position_grid_h], dim=-1).view(
@@ -83,12 +92,15 @@ class ProgressiveGaussianSplatter(nn.Module):
             raw_colors = torch.zeros(1, num_gaussians, 3)
 
         # Initialize Gaussian parameters
-        self.use_offset = use_offset
         self.position = nn.Parameter(position_grid[None])
         self.log_scale = nn.Parameter(torch.zeros(1, num_gaussians, 2) - 5)
         self.rotation = nn.Parameter(torch.zeros(1, num_gaussians))
         self.color = nn.Parameter(raw_colors + int(use_offset))
         self.register_buffer("alphas", torch.ones(1, num_gaussians))
+        self.register_buffer("use_offset", torch.tensor(int(use_offset), dtype=torch.float32))
+
+    def load_state_dict(self, state_dict, strict = False, assign = False):
+        return super().load_state_dict(state_dict, strict, assign)
 
     def forward(self, num_active_features=None, size=None):
         if num_active_features is None:
@@ -106,7 +118,7 @@ class ProgressiveGaussianSplatter(nn.Module):
             self.alphas[:, :num_active_features],
             x_grid,
             y_grid,
-        ) - int(self.use_offset)
+        ) - self.use_offset
 
 
 lpips = LPIPS(net="alex").to(DEVICE).requires_grad_(False).eval()
@@ -132,12 +144,12 @@ def psnr(image1, image2):
 def progressive_training(run_name, file):
     # Parameters
     # 256px -> 512px -> 1024px, 1600/600/300 step
-    height, width = 256, 256
+    resolution = 256
     scales = [1, 2, 4]
     steps = [1600, 600, 300]
-    max_height, max_width = max(scales) * height, max(scales) * width
+    max_res = max(scales) * resolution
     # 1bpp for 1024px img in 10bit config
-    num_gaussians = 2048
+    num_gaussians = 4096
     log_period = 20
     lr = min(0.05 * 4096 / num_gaussians, 0.03)
 
@@ -146,19 +158,18 @@ def progressive_training(run_name, file):
     image = Image.open(file).convert("RGB")
     target_image_base = (
         trnsF.to_tensor(
-            trnsF.center_crop(
-                trnsF.resize(
-                    image,
-                    max(max_height, max_width),
-                    interpolation=trnsF.InterpolationMode.BOX,
-                    antialias=True,
-                ),
-                (max_height, max_width),
-            )
+            trnsF.resize(
+                image,
+                max_res,
+                interpolation=trnsF.InterpolationMode.BOX,
+                antialias=True,
+            ),
         )
         .unsqueeze(0)
         .to(DEVICE)
     )
+    max_height, max_width = target_image_base.shape[2:]
+    height, width = max_height//max(scales), max_width//max(scales)
 
     # Initialize splatter
     splatter = ProgressiveGaussianSplatter(
@@ -252,13 +263,14 @@ def coarse_to_fine_visualization(model, target_image, file_name=None, run_name=N
     )
     splatter.load_state_dict(model.state_dict())
     height, width = target_image.shape[2:]
+    aspect_ratio = width / height
 
     # Generate images for each level
     with torch.no_grad():
         rendered = splatter(size=(height, width)).cpu()
 
     # Create visualization
-    fig, axes = plt.subplots(1,2, figsize=(10, 4))
+    fig, axes = plt.subplots(1,2, figsize=(8 * aspect_ratio, 5))
 
     # Target image
     img = target_image[0].cpu().permute(1, 2, 0).clamp(0, 1)
@@ -320,7 +332,7 @@ def eval(
 
 def main():
     pl.seed_everything(0)
-    run_name = "2dgs_img_comp-2048-sashimi-ssim-msssim-l2-2.5kstep-nooffset"
+    run_name = "2dgs_img_comp-4096-sashimi-ssim-msssim-l2-2.5kstep-nooffset-nosq"
     file = "./data/sashimi.jpg"
 
     os.makedirs(f"logs/{run_name}", exist_ok=True)
@@ -349,6 +361,8 @@ def main():
             "libx264",
             "-pix_fmt",
             "yuv420p",
+            "-vf", 
+            '"scale=trunc(iw/2)*2:trunc(ih/2)*2"',
             f"logs/{run_name}/prog.mp4",
         ],
         capture_output=True,
