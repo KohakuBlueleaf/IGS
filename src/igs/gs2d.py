@@ -466,7 +466,14 @@ class GaussianSplatting2DChunkedKernel(autograd.Function):
 
 
 TorchGaussianSplatting2DKernel = GaussianSplatting2DKernel
-GaussianSplatting2DKernel = TritonGaussianSplatting2DChunked or GaussianSplatting2DKernel
+TorchGaussianSplatting2DChunked = GaussianSplatting2DChunkedKernel
+
+GaussianSplatting2DKernel = (
+    TritonGaussianSplatting2DChunked
+    or TritonGaussianSplatting2D
+    or GaussianSplatting2DChunkedKernel
+    or GaussianSplatting2DKernel
+)
 
 
 class GaussianSplatting2D(nn.Module):
@@ -484,15 +491,22 @@ class GaussianSplatting2D(nn.Module):
         self.emb_dim = emb_dim
         self.chunk_size = 0
         self.output_dim = output_dim
+
         self.min_val = value_range[0]
         self.max_val = value_range[1]
-        self.value_scale = inp_val_scale
-        self.scale_min = scale_range[0]
-        self.scale_max = scale_range[1]
 
         self.proj = nn.Linear(emb_dim, num_gaussians_per_emb * (6 + output_dim))
-        nn.init.normal_(self.proj.weight, mean=0.0, std=0.001)
-        nn.init.normal_(self.proj.bias, mean=0.0, std=0.1)
+        nn.init.normal_(self.proj.weight, mean=0.0, std=0.02)
+
+        # positions (2)
+        # log_scales (2)
+        # rotations (1)
+        # logit_opacity (1)
+        # colors (output_dim)
+        gaussian_bias = torch.randn(num_gaussians_per_emb, 6 + output_dim) * 0.1
+        gaussian_bias[:, :2] = 0
+        gaussian_bias[:, 2:4] = -3
+        self.proj.bias.data.copy_(gaussian_bias.view_as(self.proj.bias))
 
     @staticmethod
     def xy_grid(size=None, device=None):
@@ -516,6 +530,7 @@ class GaussianSplatting2D(nn.Module):
         return x_grid, y_grid
 
     @staticmethod
+    @torch.compile(mode="default", dynamic=True)
     def render(
         positions,
         colors,
@@ -635,32 +650,32 @@ class GaussianSplatting2D(nn.Module):
             # pos_map will put h_pos before w_pos which means y_grid is first
             y_grid, x_grid = grid.split([1, 1], dim=1)
 
-        value_scale = self.value_scale
+        ## Preprocess
+        # Colors: usually have a known value range constraint, use sigmoid
+        # Opacity: Not really meaningful in 2DGS for image
+        # scales: add eps to avoid near 0 scales which cause NaN output
+        # rotation: squeeze(-1)
         colors = (
-            torch.sigmoid(colors * value_scale) * (self.max_val - self.min_val)
-            + self.min_val
+            torch.sigmoid(colors * 5) * (self.max_val - self.min_val) + self.min_val + 1
         )  # [k, 3]
-        # alphas = torch.sigmoid(logit_opacity[..., 0] * value_scale) + 0.1  # [B, ng]
-        alphas = torch.ones_like(
-            logit_opacity[..., 0]
-        )  # in Image GS, opacity may not be meaningful
-        scales = torch.exp(
-            torch.sigmoid(log_scales * value_scale) * (self.scale_max - self.scale_min)
-            + self.scale_min
-        )  # [B, ng, 2]
-        rotations = rotations[..., 0]  # [B, ng]
+        alphas = torch.ones_like(logit_opacity[..., 0])
+        scales = torch.exp(log_scales) + eps
+        rotations = rotations[..., 0]
         log_vram("Preprocess")
 
-        output = self.render(
-            positions,
-            colors,
-            scales,
-            rotations,
-            alphas,
-            x_grid,
-            y_grid,
-            eps,
-            fused,
+        output = (
+            self.render(
+                positions,
+                colors,
+                scales,
+                rotations,
+                alphas,
+                x_grid,
+                y_grid,
+                eps,
+                fused,
+            )
+            - 1
         )
         return output, gs_feature
 
