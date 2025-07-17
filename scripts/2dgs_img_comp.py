@@ -362,7 +362,7 @@ def main():
             "-pix_fmt",
             "yuv420p",
             "-vf", 
-            '"scale=trunc(iw/2)*2:trunc(ih/2)*2"',
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
             f"logs/{run_name}/prog.mp4",
         ],
         capture_output=True,
