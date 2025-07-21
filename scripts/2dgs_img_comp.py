@@ -33,19 +33,19 @@ class ProgressiveGaussianSplatter(nn.Module):
         if image is not None:
             b, c, h, w = image.shape
             aspect_ratio = w / h
-            w_grid_size = aspect_ratio ** 0.5
-            h_grid_size = 1 / aspect_ratio ** 0.5
+            w_grid_size = aspect_ratio**0.5
+            h_grid_size = 1 / aspect_ratio**0.5
         else:
             w_grid_size = 1
             h_grid_size = 1
 
         position_grid_size = int(num_gaussians**0.5)
-        position_grid_h = torch.linspace(-h_grid_size, h_grid_size, position_grid_size)[:, None].repeat(
-            1, position_grid_size
-        )
-        position_grid_v = torch.linspace(-w_grid_size, w_grid_size, position_grid_size)[None, :].repeat(
-            position_grid_size, 1
-        )
+        position_grid_h = torch.linspace(-h_grid_size, h_grid_size, position_grid_size)[
+            :, None
+        ].repeat(1, position_grid_size)
+        position_grid_v = torch.linspace(-w_grid_size, w_grid_size, position_grid_size)[
+            None, :
+        ].repeat(position_grid_size, 1)
         position_grid = torch.stack([position_grid_v, position_grid_h], dim=-1).view(
             -1, 2
         )
@@ -97,9 +97,11 @@ class ProgressiveGaussianSplatter(nn.Module):
         self.rotation = nn.Parameter(torch.zeros(1, num_gaussians))
         self.color = nn.Parameter(raw_colors + int(use_offset))
         self.register_buffer("alphas", torch.ones(1, num_gaussians))
-        self.register_buffer("use_offset", torch.tensor(int(use_offset), dtype=torch.float32))
+        self.register_buffer(
+            "use_offset", torch.tensor(int(use_offset), dtype=torch.float32)
+        )
 
-    def load_state_dict(self, state_dict, strict = False, assign = False):
+    def load_state_dict(self, state_dict, strict=False, assign=False):
         return super().load_state_dict(state_dict, strict, assign)
 
     def forward(self, num_active_features=None, size=None):
@@ -110,15 +112,18 @@ class ProgressiveGaussianSplatter(nn.Module):
         x_grid, y_grid = GaussianSplatting2D.xy_grid(size, self.position.device)
         x_grid = x_grid[None]
         y_grid = y_grid[None]
-        return GaussianSplatting2D.render(
-            self.position[:, :num_active_features],
-            self.color[:, :num_active_features],
-            torch.exp(self.log_scale[:, :num_active_features]) + EPS,
-            self.rotation[:, :num_active_features],
-            self.alphas[:, :num_active_features],
-            x_grid,
-            y_grid,
-        ) - self.use_offset
+        return (
+            GaussianSplatting2D.render(
+                self.position[:, :num_active_features],
+                self.color[:, :num_active_features],
+                torch.exp(self.log_scale[:, :num_active_features]) + EPS,
+                self.rotation[:, :num_active_features],
+                self.alphas[:, :num_active_features],
+                x_grid,
+                y_grid,
+            )
+            - self.use_offset
+        )
 
 
 lpips = LPIPS(net="alex").to(DEVICE).requires_grad_(False).eval()
@@ -169,7 +174,7 @@ def progressive_training(run_name, file):
         .to(DEVICE)
     )
     max_height, max_width = target_image_base.shape[2:]
-    height, width = max_height//max(scales), max_width//max(scales)
+    height, width = max_height // max(scales), max_width // max(scales)
 
     # Initialize splatter
     splatter = ProgressiveGaussianSplatter(
@@ -270,7 +275,7 @@ def coarse_to_fine_visualization(model, target_image, file_name=None, run_name=N
         rendered = splatter(size=(height, width)).cpu()
 
     # Create visualization
-    fig, axes = plt.subplots(1,2, figsize=(8 * aspect_ratio, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(8 * aspect_ratio, 5))
 
     # Target image
     img = target_image[0].cpu().permute(1, 2, 0).clamp(0, 1)
@@ -361,7 +366,7 @@ def main():
             "libx264",
             "-pix_fmt",
             "yuv420p",
-            "-vf", 
+            "-vf",
             "scale=trunc(iw/2)*2:trunc(ih/2)*2",
             f"logs/{run_name}/prog.mp4",
         ],
