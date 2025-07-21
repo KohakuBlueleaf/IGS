@@ -478,34 +478,26 @@ GaussianSplatting2DKernel = (
 
 class GaussianSplatting2D(nn.Module):
     def __init__(
-        self,
-        num_gaussians_per_emb,
-        emb_dim,
-        output_dim=3,
-        value_range=(-1, 1),
-        inp_val_scale=2,
-        scale_range=(-6, 2),
+        self, num_gaussians_per_emb, emb_dim, output_dim=3, pos_map_offset=False
     ):
         super().__init__()
         self.num_gaussians_per_emb = num_gaussians_per_emb
         self.emb_dim = emb_dim
         self.chunk_size = 0
         self.output_dim = output_dim
-
-        self.min_val = value_range[0]
-        self.max_val = value_range[1]
+        self.pos_map_offset = pos_map_offset
 
         self.proj = nn.Linear(emb_dim, num_gaussians_per_emb * (6 + output_dim))
-        nn.init.normal_(self.proj.weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.proj.weight, mean=0.0, std=0.01)
 
         # positions (2)
         # log_scales (2)
         # rotations (1)
         # logit_opacity (1)
         # colors (output_dim)
-        gaussian_bias = torch.randn(num_gaussians_per_emb, 6 + output_dim) * 0.1
+        gaussian_bias = torch.randn(num_gaussians_per_emb, 6 + output_dim) * 0.01
         gaussian_bias[:, :2] = 0
-        gaussian_bias[:, 2:4] = -3
+        gaussian_bias[:, 2:4] = -4
         self.proj.bias.data.copy_(gaussian_bias.view_as(self.proj.bias))
 
     @staticmethod
@@ -616,7 +608,16 @@ class GaussianSplatting2D(nn.Module):
             eps,
         )
 
-    def forward(self, feature, size=None, grid=None, eps=1e-6, fused=True):
+    def forward(
+        self,
+        feature,
+        size=None,
+        grid=None,
+        pos_map=None,
+        eps=1e-6,
+        fused=True,
+        scale=None,
+    ):
         """
         feature: [B, N, D]
         gs_feat: [B, N, (n*9)] -> [B, N*n, 9]
@@ -631,7 +632,7 @@ class GaussianSplatting2D(nn.Module):
         y_grid: [B, H, W]
         """
 
-        gs_feature = self.proj(feature).unflatten(-1, (-1, 9)).flatten(1, 2)
+        gs_feature = self.proj(feature).unflatten(-1, (-1, 6+self.output_dim)).flatten(1, 2)
         b, ng, _ = gs_feature.shape
 
         (
@@ -648,34 +649,42 @@ class GaussianSplatting2D(nn.Module):
             y_grid = y_grid[None].repeat(b, 1, 1, 1)
         else:
             # pos_map will put h_pos before w_pos which means y_grid is first
-            y_grid, x_grid = grid.split([1, 1], dim=1)
+            grid = grid.flip(1)
+            x_grid, y_grid = grid.split([1, 1], dim=1)
+        if self.pos_map_offset:
+            pos_map = torch.concat([x_grid, y_grid], dim=1)
+            if scale is not None:
+                pos_map = F.interpolate(
+                    pos_map,
+                    scale_factor=1 / scale,
+                    mode="bilinear",
+                    align_corners=True,
+                )
+            pos_map = pos_map.flatten(2, 3).transpose(1, 2)
+            assert pos_map.size(1) == feature.size(1)
+            pos_map = pos_map[..., None, :].repeat(1, 1, self.num_gaussians_per_emb, 1)
+            pos_map = pos_map.flatten(1, 2)
+            positions = positions + pos_map
 
         ## Preprocess
-        # Colors: usually have a known value range constraint, use sigmoid
-        # Opacity: Not really meaningful in 2DGS for image
+        # Opacity: Not really meaningful in 2DGS for image, skip at first
         # scales: add eps to avoid near 0 scales which cause NaN output
         # rotation: squeeze(-1)
-        colors = (
-            torch.sigmoid(colors * 5) * (self.max_val - self.min_val) + self.min_val + 1
-        )  # [k, 3]
         alphas = torch.ones_like(logit_opacity[..., 0])
         scales = torch.exp(log_scales) + eps
         rotations = rotations[..., 0]
         log_vram("Preprocess")
 
-        output = (
-            self.render(
-                positions,
-                colors,
-                scales,
-                rotations,
-                alphas,
-                x_grid,
-                y_grid,
-                eps,
-                fused,
-            )
-            - 1
+        output = self.render(
+            positions,
+            colors,
+            scales,
+            rotations,
+            alphas,
+            x_grid,
+            y_grid,
+            eps,
+            fused,
         )
         return output, gs_feature
 
